@@ -2,7 +2,9 @@
 
 `STATE_DIRECTORY` used to specify directory for `state.json` with sessions, toggles and credentials, using current by default
 
-`LINKS` used to specify SSE-source of links, using `http://127.0.0.1:8891/links` by default
+`LINKS` used to specify SSE-source of links, using `http://127.0.0.1:8891/links` by default, only `https://pulse.mirea.ru/selfapprove?token=<uuid>` is accepted
+
+`/setup <chat> [thread]` sent to the bot creates a message with the latest link in that chat (thread for forum groups), pins it and saves its ids to `state.json` to keep it updated
 
 ### startup
 

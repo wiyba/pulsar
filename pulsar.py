@@ -11,7 +11,7 @@ import struct
 import sys
 import time
 from datetime import date, datetime, timedelta
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
@@ -19,6 +19,7 @@ CONFIG = json.load(open(sys.argv[1]))
 STATE = os.environ.get("STATE_DIRECTORY", ".") + "/state.json"
 LINKS = os.environ.get("LINKS", "http://127.0.0.1:8891/links")
 PULSE = "https://pulse.mirea.ru"
+LINK = re.compile(r"https://pulse\.mirea\.ru/selfapprove\?token=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
 UA = "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 GRPC = {
     "Content-Type": "application/grpc-web+proto",
@@ -46,9 +47,12 @@ log = logging.getLogger("pulsar")
 
 users = CONFIG["users"]
 chats = {int(user["telegram"]): name for name, user in users.items()}
-state = {"sessions": {}, "marks": {}, "cooldown": {}, "creds": {}, "last": ""} | (json.load(open(STATE)) if os.path.exists(STATE) else {})
+state = {"sessions": {}, "marks": {}, "cooldown": {}, "creds": {}, "last": "", "updated": 0, "pin": {"chat": None, "thread": None, "message": None}}
+if os.path.exists(STATE):
+    state |= json.load(open(STATE))
 pending = {}
 notified = {}
+changed = asyncio.Event()
 tg = httpx.AsyncClient(base_url=f"https://api.telegram.org/bot{CONFIG['token']}", timeout=70)
 
 
@@ -68,6 +72,13 @@ def keyboard(name):
 
 async def send(chat, text):
     await tg.post("/sendMessage", json={"chat_id": chat, "text": text, "reply_markup": keyboard(chats[chat]) if chat in chats else None})
+
+
+async def api(method, **params):
+    body = (await tg.post(f"/{method}", json=params)).json()
+    if not body["ok"]:
+        raise Failed(body["description"])
+    return body["result"]
 
 
 async def updates():
@@ -375,6 +386,8 @@ async def handle(name, chat, message):
             reply = "вошёл"
         elif command in HANDLERS:
             reply = await call(name, HANDLERS[command])
+        elif command.startswith("setup"):
+            reply = await setup(*map(int, command.split()[1:]))
         else:
             reply = "кнопки снизу"
     except Exception as e:
@@ -383,9 +396,8 @@ async def handle(name, chat, message):
     await send(chat, reply)
 
 
-async def mark(name, link):
-    token = parse_qs(urlparse(link).query).get("token", [""])[0]
-    if not token or time.time() < state["cooldown"].get(name, 0):
+async def mark(name, token):
+    if time.time() < state["cooldown"].get(name, 0):
         return
     state["cooldown"][name] = time.time() + 60
     try:
@@ -397,7 +409,7 @@ async def mark(name, link):
         result, cooldown = f"✗ {e}", 60
     state["cooldown"][name] = time.time() + cooldown
     save()
-    log.info("mark %s %s: %s", name, link, result)
+    log.info("mark %s %s: %s", name, token, result)
     if result.startswith("✓") or notified.get(name) != result:
         await send(int(users[name]["telegram"]), result)
     notified[name] = result
@@ -408,16 +420,56 @@ async def links(group):
         try:
             async with httpx.AsyncClient(timeout=None) as http, http.stream("GET", LINKS) as res:
                 async for line in res.aiter_lines():
-                    link = line[6:] if line.startswith("data: ") else ""
-                    if link and link != state["last"]:
-                        state["last"] = link
-                        save()
-                        for name in users:
-                            if state["marks"].get(name):
-                                group.create_task(mark(name, link))
+                    found = LINK.fullmatch(line.removeprefix("data: "))
+                    if not found or found.group() == state["last"]:
+                        continue
+                    state["last"] = found.group()
+                    state["updated"] = int(time.time())
+                    save()
+                    changed.set()
+                    for name in users:
+                        if state["marks"].get(name):
+                            group.create_task(mark(name, found.group(1)))
         except httpx.HTTPError as e:
             log.warning("links: %s", e)
         await asyncio.sleep(1)
+
+
+def render():
+    text = "кода нет"
+    if state["last"]:
+        stamp = f'<tg-time unix="{state["updated"]}" format="r">только что</tg-time>'
+        text = f'<a href="{state["last"]}">отметиться</a>\n\nобновлено {stamp}'
+    return {"text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}}
+
+
+async def publish():
+    while True:
+        await changed.wait()
+        changed.clear()
+        if not state["pin"]["message"]:
+            continue
+        try:
+            res = await tg.post("/editMessageText", json={"chat_id": state["pin"]["chat"], "message_id": state["pin"]["message"]} | render())
+        except httpx.HTTPError as e:
+            log.warning("publish: %s", e)
+            continue
+        if res.status_code == 429:
+            await asyncio.sleep(res.json()["parameters"]["retry_after"])
+            changed.set()
+        elif not res.is_success:
+            log.warning("publish: %s", res.text)
+
+
+async def setup(chat, thread=None):
+    params = {"chat_id": chat} | render()
+    if thread:
+        params["message_thread_id"] = thread
+    sent = await api("sendMessage", **params)
+    state["pin"] = {"chat": chat, "thread": thread, "message": sent["message_id"]}
+    save()
+    await api("pinChatMessage", chat_id=chat, message_id=sent["message_id"], disable_notification=True)
+    return "закрепил"
 
 
 async def keepalive():
@@ -436,6 +488,7 @@ async def keepalive():
 async def main():
     async with asyncio.TaskGroup() as group:
         group.create_task(links(group))
+        group.create_task(publish())
         group.create_task(keepalive())
         async for update in updates():
             message = update.get("message") or {}
