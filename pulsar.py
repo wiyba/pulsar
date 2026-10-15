@@ -19,7 +19,7 @@ CONFIG = json.load(open(sys.argv[1]))
 STATE = os.environ.get("STATE_DIRECTORY", ".") + "/state.json"
 LINKS = os.environ.get("LINKS", "http://127.0.0.1:8891/links")
 PULSE = "https://pulse.mirea.ru"
-LINK = re.compile(r"https://pulse\.mirea\.ru/selfapprove\?token=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
+LINK = re.compile(r"https://pulse\.mirea\.ru/lessons/visiting-logs/selfapprove\?token=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
 UA = "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 GRPC = {
     "Content-Type": "application/grpc-web+proto",
