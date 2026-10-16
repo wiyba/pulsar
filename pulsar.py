@@ -86,6 +86,7 @@ async def updates():
     while True:
         try:
             res = await tg.get("/getUpdates", params={"offset": offset, "timeout": 50})
+            res.raise_for_status()
             for update in res.json()["result"]:
                 offset = update["update_id"] + 1
                 yield update
